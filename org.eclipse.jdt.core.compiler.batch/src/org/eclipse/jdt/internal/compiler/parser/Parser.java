@@ -4535,6 +4535,7 @@ private void consumeTemplateExpression(Expression expression, Expression process
 	exp.sourceStart = processor.sourceStart;
 	exp.sourceEnd = expression.sourceEnd;
 	pushOnExpressionStack(exp);
+	problemReporter().validateJavaFeatureSupport(JavaFeature.STRING_TEMPLATES, exp.sourceStart, exp.sourceEnd);
 }
 protected void consumeTemplateExpressionWithPrimary() {
 	Expression template = this.expressionStack[this.expressionPtr--];
@@ -9984,7 +9985,12 @@ protected void consumeStaticOnly() {
 		this.recoveredStaticInitializerStart = this.intStack[this.intPtr]; // remember start position only for static initializers
 	}
 }
-private void consumeTemplate(int token) {
+
+protected Parser getEmbeddedExpressionParser() {
+	return new Parser(this.problemReporter, false);
+}
+
+protected void consumeTemplate(int token) {
 	List<IStringTemplateComponent> components = this.scanner.getCurrentTemplateComponents();
 	int size = components.size();
 	StringLiteral[] fragments = new StringLiteral[size/2 + 1];
@@ -10005,9 +10011,13 @@ private void consumeTemplate(int token) {
 			textBlockFraments[fi++] = tf.text();
 		} else { // embedded expression coordinates
 			EmbeddedExpression expComp = (EmbeddedExpression) component;
-			final Parser parser = new Parser(this.problemReporter, false);
 			int length = expComp.end() - expComp.start();
-			expressions[ei++] = parser.parseExpression(this.scanner.source, expComp.start(), length, this.compilationUnit, false, true);
+			expressions[ei++] = parseEmbeddedExpression(getEmbeddedExpressionParser(),
+														this.scanner.source,
+														expComp.start(),
+														length,
+														this.compilationUnit,
+														false);
 		}
 	}
 	if (isMultiline) {
@@ -10021,7 +10031,6 @@ private void consumeTemplate(int token) {
 	}
 	//	get rid of all the cached values
 	this.scanner.withoutUnicodePtr = 0;
-	this.scanner.textBlockOffset = -1;
 	StringTemplate template = new StringTemplate(fragments, expressions, fragments[0].sourceStart, fragments[expressions.length].sourceEnd, isMultiline);
 	pushOnExpressionStack(template);
 }
@@ -10943,12 +10952,36 @@ protected void consumeTypePattern() {
 	pushOnAstStack(aTypePattern);
 }
 protected void consumeRecordPattern() {
-	int length = this.astLengthPtr == -1 ? 0 : this.astLengthStack[this.astLengthPtr--];
-	this.astPtr -= length;
+
+	int length;
+	Annotation[] typeAnnotations = null;
+	if ((length = this.expressionLengthStack[this.expressionLengthPtr--]) != 0) {
+		System.arraycopy(
+			this.expressionStack,
+			(this.expressionPtr -= length) + 1,
+			typeAnnotations = new Annotation[length],
+			0,
+			length);
+	}
+
 	TypeReference type = getTypeReference(0);
+
+	if (typeAnnotations != null) {
+		int levels = type.getAnnotatableLevels();
+		if (type.annotations == null)
+			type.annotations = new Annotation[levels][];
+		type.annotations[0] = typeAnnotations;
+		type.sourceStart = type.annotations[0][0].sourceStart;
+		type.bits |= ASTNode.HasTypeAnnotations;
+	}
+
 	int sourceEnd = this.intStack[this.intPtr--];
 	this.intPtr--;
 	RecordPattern recPattern = new RecordPattern(type, type.sourceStart, sourceEnd);
+
+	length = this.astLengthPtr == -1 ? 0 : this.astLengthStack[this.astLengthPtr--];
+	this.astPtr -= length;
+
 	if (length != 0) {
 		Pattern[] patterns = new Pattern[length];
 		System.arraycopy(
@@ -13781,6 +13814,10 @@ public char[][] parsePackageDeclaration(char[] source, CompilationResult result)
 public Expression parseExpression(char[] source, int offset, int length, CompilationUnitDeclaration unit, boolean recordLineSeparators) {
 	return parseExpression(source, offset, length, unit, recordLineSeparators, false);
 }
+
+protected Expression parseEmbeddedExpression(Parser parser, char[] source, int offset, int length, CompilationUnitDeclaration unit, boolean recordLineSeparators) {
+	return parser.parseExpression(source, offset, length, unit, recordLineSeparators, true);
+}
 private Expression parseExpression(char[] source, int offset, int length, CompilationUnitDeclaration unit, boolean recordLineSeparators, boolean embeddedExpression) {
 
 	initialize();
@@ -13794,6 +13831,7 @@ private Expression parseExpression(char[] source, int offset, int length, Compil
 	this.scanner.resetTo(offset, offset + length - 1);
 	try {
 		if (embeddedExpression) {
+			this.haltOnSyntaxError = true;
 			int nextToken;
 			try {
 				nextToken = this.scanner.getNextToken();
